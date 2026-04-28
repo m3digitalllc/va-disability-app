@@ -1,11 +1,12 @@
 "use client";
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { CheckCircle, XCircle, Loader2, Mail } from "lucide-react";
 import { api } from "@/lib/api";
 
-export default function VerifyEmailPage() {
+function VerifyEmailContent() {
   const params = useSearchParams();
   const token = params.get("token");
   const email = params.get("email");
@@ -83,5 +84,13 @@ export default function VerifyEmailPage() {
         Register
       </Link>
     </div>
+  );
+}
+
+export default function VerifyEmailPage() {
+  return (
+    <Suspense fallback={<div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-gray-400" /></div>}>
+      <VerifyEmailContent />
+    </Suspense>
   );
 }

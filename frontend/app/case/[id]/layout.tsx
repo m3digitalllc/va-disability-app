@@ -1,13 +1,15 @@
 "use client";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { Shield, MessageSquare, FileText, ClipboardList, Mail, ArrowLeft } from "lucide-react";
+import { MessageSquare, FileText, ClipboardList, Mail, ArrowLeft, FileSignature } from "lucide-react";
+import AppHeader from "@/components/AppHeader";
 
 const NAV = [
   { href: "interview", label: "Interview", icon: MessageSquare, phase: 1 },
   { href: "documents", label: "Documents", icon: FileText, phase: 4 },
   { href: "assessment", label: "Assessment", icon: ClipboardList, phase: 5 },
   { href: "letters", label: "Letters", icon: Mail, phase: 5 },
+  { href: "form", label: "Form 21-526EZ", icon: FileSignature, phase: 5 },
 ];
 
 export default function CaseLayout({ children }: { children: React.ReactNode }) {
@@ -16,20 +18,20 @@ export default function CaseLayout({ children }: { children: React.ReactNode }) 
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Top bar */}
-      <header className="bg-white border-b border-gray-200 px-6 py-3">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/dashboard" className="text-gray-400 hover:text-gray-600 transition">
-              <ArrowLeft className="w-5 h-5" />
-            </Link>
-            <div className="flex items-center gap-2 font-semibold text-brand-700 text-sm">
-              <Shield className="w-4 h-4" />
-              VA Claims Assistant
-            </div>
-          </div>
+      <AppHeader />
+
+      {/* Back-to-dashboard sub-bar — keeps the case-context return path */}
+      <div className="bg-white border-b border-gray-100 px-6 py-2">
+        <div className="max-w-6xl mx-auto">
+          <Link
+            href="/dashboard"
+            className="inline-flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back to claims
+          </Link>
         </div>
-      </header>
+      </div>
 
       <div className="max-w-6xl mx-auto w-full flex-1 flex flex-col md:flex-row gap-0 px-4 md:px-6 py-6">
         {/* Sidebar nav */}

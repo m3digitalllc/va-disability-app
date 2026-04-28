@@ -51,6 +51,12 @@ services:
     ports:
       - "3000:3000"
 
+  mailhog:
+    image: mailhog/mailhog
+    restart: unless-stopped
+    ports:
+      - "8025:8025"   # web UI — open http://localhost:8025 to read emails
+
   nginx:
     image: nginx:alpine
     restart: unless-stopped

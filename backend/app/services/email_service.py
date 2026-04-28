@@ -30,6 +30,7 @@ def send_verification_email(to_email: str, token: str) -> None:
     msg.attach(MIMEText(html, "html"))
 
     with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-        server.starttls()
-        server.login(settings.SMTP_USER, settings.SMTP_PASS)
-        server.sendmail(settings.SMTP_USER, to_email, msg.as_string())
+        if settings.SMTP_PASS:          # production SMTP requires auth
+            server.starttls()
+            server.login(settings.SMTP_USER, settings.SMTP_PASS)
+        server.sendmail(settings.SMTP_USER or "noreply@localhost", to_email, msg.as_string())

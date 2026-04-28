@@ -2,7 +2,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import Image from "next/image";
 import { api, auth } from "@/lib/api";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -61,7 +60,8 @@ export default function TwoFASetupPage() {
       const data = await res.json();
       sessionStorage.removeItem("setup_token");
       auth.setTokens(data.access_token, data.refresh_token);
-      toast.success("Two-factor authentication enabled!");
+      if (data.first_name) auth.setName(data.first_name);
+      toast.success(`Welcome to VA Claims Assistant${data.first_name ? `, ${data.first_name}` : ""}! Two-factor authentication is enabled.`);
       router.replace("/dashboard");
     } catch (err: any) {
       toast.error(err.message);

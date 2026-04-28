@@ -8,7 +8,8 @@ _client: anthropic.AsyncAnthropic | None = None
 def get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        # max_retries=0 — we handle retries ourselves to avoid silent token burn
+        _client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, max_retries=0)
     return _client
 
 

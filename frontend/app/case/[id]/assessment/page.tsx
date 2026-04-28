@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, RefreshCw, TrendingUp, AlertTriangle } from "lucide-react";
+import { Loader2, RefreshCw, TrendingUp, AlertTriangle, XCircle } from "lucide-react";
 import ConditionCard from "@/components/assessment/ConditionCard";
 import { api } from "@/lib/api";
 
@@ -79,6 +79,20 @@ export default function AssessmentPage() {
           <Loader2 className="w-8 h-8 animate-spin text-brand-500 mx-auto mb-3" />
           <p className="text-brand-700 font-medium">Analyzing your medical records…</p>
           <p className="text-brand-500 text-sm mt-1">This may take 30–60 seconds</p>
+        </div>
+      )}
+
+      {/* Parse failure banner — shown when backend couldn't extract valid JSON from Claude */}
+      {assessment && !running && assessment._raw && !assessment.conditions?.length && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700 flex items-start gap-3 mb-2">
+          <XCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold">Assessment parsing failed</p>
+            <p className="text-red-500 mt-0.5">
+              Claude returned a response that could not be parsed as valid JSON. Click{" "}
+              <strong>Re-run Assessment</strong> above — this usually succeeds on a second attempt.
+            </p>
+          </div>
         </div>
       )}
 

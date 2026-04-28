@@ -1,7 +1,9 @@
 "use client";
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import StreamingChat from "@/components/chat/StreamingChat";
-import { InfoIcon } from "lucide-react";
+import { CheckCircle2, InfoIcon } from "lucide-react";
+import { api } from "@/lib/api";
 
 const PHASES = [
   "Service History",
@@ -13,6 +15,11 @@ const PHASES = [
 
 export default function InterviewPage() {
   const { id } = useParams<{ id: string }>();
+  const [currentPhase, setCurrentPhase] = useState(1);
+
+  useEffect(() => {
+    api.getCase(id).then((c) => setCurrentPhase(c.current_phase)).catch(() => {});
+  }, [id]);
 
   return (
     <div className="flex flex-col h-[calc(100vh-160px)]">
@@ -25,21 +32,40 @@ export default function InterviewPage() {
 
       {/* Phase indicator */}
       <div className="flex gap-2 mb-4 overflow-x-auto pb-1">
-        {PHASES.map((phase, i) => (
-          <div
-            key={phase}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500 whitespace-nowrap shrink-0"
-          >
-            <span className="w-4 h-4 rounded-full bg-gray-300 text-gray-600 flex items-center justify-center text-xs font-bold">
-              {i + 1}
-            </span>
-            {phase}
-          </div>
-        ))}
+        {PHASES.map((phase, i) => {
+          const phaseNum = i + 1;
+          const isComplete = phaseNum < currentPhase;
+          const isActive = phaseNum === currentPhase;
+          return (
+            <div
+              key={phase}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                isActive
+                  ? "bg-brand-100 text-brand-700 ring-1 ring-brand-300"
+                  : isComplete
+                  ? "bg-green-50 text-green-700"
+                  : "bg-gray-100 text-gray-400"
+              }`}
+            >
+              {isComplete ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
+              ) : (
+                <span
+                  className={`w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
+                    isActive ? "bg-brand-500 text-white" : "bg-gray-300 text-gray-500"
+                  }`}
+                >
+                  {phaseNum}
+                </span>
+              )}
+              {phase}
+            </div>
+          );
+        })}
       </div>
 
       <div className="flex-1 min-h-0">
-        <StreamingChat caseId={id} />
+        <StreamingChat caseId={id} onPhaseChange={setCurrentPhase} />
       </div>
 
       <p className="text-xs text-gray-400 mt-2 flex items-center gap-1">

@@ -13,9 +13,10 @@ interface Message {
 
 interface Props {
   caseId: string;
+  onPhaseChange?: (phase: number) => void;
 }
 
-export default function StreamingChat({ caseId }: Props) {
+export default function StreamingChat({ caseId, onPhaseChange }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -65,7 +66,7 @@ export default function StreamingChat({ caseId }: Props) {
             return next;
           });
         },
-        () => {
+        (currentPhase?: number) => {
           setMessages((prev) => {
             const next = [...prev];
             const last = next[next.length - 1];
@@ -75,12 +76,17 @@ export default function StreamingChat({ caseId }: Props) {
             return next;
           });
           setSending(false);
+          if (currentPhase !== undefined) onPhaseChange?.(currentPhase);
         }
       );
     } catch (err: any) {
-      toast.error(err.message);
-      // Remove the empty assistant bubble on error
-      setMessages((prev) => prev.filter((m) => !(m.role === "assistant" && m.content === "")));
+      toast.error(err.message ?? "Something went wrong. Please try again.");
+      // Remove any empty or incomplete assistant bubble
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.role === "assistant" && last.streaming) return prev.slice(0, -1);
+        return prev;
+      });
       setSending(false);
     }
   };

@@ -1,13 +1,16 @@
+import asyncio
 import json
+import re
+import anthropic
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Optional
-from app.models.database import get_db, Case, Letter, Document, User
+from app.models.database import get_db, Case, Letter, Document, Message, User
 from app.api.deps import get_current_user
 from app.core.encryption import encrypt, decrypt
-from app.services.skills_loader import get_condition_assessor_prompt, get_nexus_letter_prompt
+from app.services.skills_loader import get_condition_assessor_prompt_lite, get_nexus_letter_prompt
 from app.services.claude_service import complete
 from app.services.document_service import retrieve_extracted_text
 
@@ -24,6 +27,45 @@ async def _get_case(case_id: str, user: User, db: AsyncSession) -> Case:
 
 # ── Assessment ────────────────────────────────────────────────────────────────
 
+def _extract_json(text: str) -> dict:
+    """Robustly extract the first complete JSON object from a Claude response."""
+    # Strip leading/trailing code fences before any attempt
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    cleaned = cleaned.strip()
+
+    # Try the cleaned text first
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Try the raw text (sometimes no fences)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Walk forward from first { to find the matching closing }
+    source = cleaned if cleaned.startswith("{") else text
+    start = source.find("{")
+    if start == -1:
+        return {}
+    depth = 0
+    for i, ch in enumerate(source[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(source[start : i + 1])
+                except json.JSONDecodeError:
+                    break
+    return {}
+
+
 @router.post("/assess")
 async def run_assessment(
     case_id: str,
@@ -33,67 +75,172 @@ async def run_assessment(
     """Run the va-condition-assessor skill against all uploaded documents + interview data."""
     case = await _get_case(case_id, user, db)
 
-    # Gather extracted text from all processed documents
+    # Gather document context.
+    # Prefer the agent-generated review summary (compact, information-dense).
+    # Fall back to a raw excerpt when no review summary exists yet.
+    DOC_CHAR_LIMIT = 6000
     doc_result = await db.execute(
         select(Document).where(Document.case_id == case_id, Document.processed == True)
     )
     docs = doc_result.scalars().all()
     doc_texts = []
     for doc in docs:
-        if doc.extracted_text_path:
+        if doc.review_summary_encrypted:
+            # Use the pre-computed agent review summary — already token-efficient
+            summary = decrypt(doc.review_summary_encrypted)
+            doc_texts.append(f"### Document Review Summary: {doc.original_filename}\n{summary}")
+        elif doc.extracted_text_path:
+            # No summary yet — fall back to a small excerpt
             text = retrieve_extracted_text(doc.extracted_text_path)
-            doc_texts.append(f"### Document: {doc.original_filename}\n{text}")
+            total_chars = len(text)
+            if total_chars > DOC_CHAR_LIMIT:
+                excerpt = (
+                    text[:3000]
+                    + f"\n\n[... {total_chars - 6000:,} chars omitted — run Document Review for full analysis ...]\n\n"
+                    + text[-3000:]
+                )
+            else:
+                excerpt = text
+            doc_texts.append(f"### Document (excerpt): {doc.original_filename}\n{excerpt}")
 
-    if not doc_texts:
-        raise HTTPException(status_code=400, detail="No processed documents found. Upload medical records first.")
+    # Gather interview context — prefer compact <phase_summary> blocks over raw transcript
+    msg_result = await db.execute(
+        select(Message).where(Message.case_id == case_id).order_by(Message.created_at)
+    )
+    interview_messages = msg_result.scalars().all()
 
-    combined_docs = "\n\n".join(doc_texts)
+    # Extract structured phase summaries (assistant emits these at the end of each phase)
+    phase_summaries = []
+    for m in interview_messages:
+        if m.role == "assistant":
+            raw = decrypt(m.content_encrypted)
+            for match in re.finditer(r"<phase_summary>(.*?)</phase_summary>", raw, re.DOTALL):
+                phase_summaries.append(match.group(1).strip())
 
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "Please perform a full condition assessment based on the following medical documents.\n\n"
-                "Output your assessment as structured JSON with this schema:\n"
-                "{\n"
-                '  "conditions": [\n'
-                '    {\n'
-                '      "name": "condition name",\n'
-                '      "dc_code": "XXXX",\n'
-                '      "icd10": "X00.0",\n'
-                '      "evidence": "what supports this",\n'
-                '      "current_rating_pct": 0,\n'
-                '      "rating_basis": "explanation",\n'
-                '      "pathway_to_higher": "what evidence is missing",\n'
-                '      "dbq_form": "form name",\n'
-                '      "type": "primary|secondary|presumptive",\n'
-                '      "nexus_needed": true\n'
-                "    }\n"
-                "  ],\n"
-                '  "secondary_opportunities": [\n'
-                '    {"condition": "", "caused_by": "", "evidence_status": "", "next_step": ""}\n'
-                "  ],\n"
-                '  "priority_actions": [\n'
-                '    {"action": "", "expected_impact": ""}\n'
-                "  ],\n"
-                '  "combined_rating_current": 0,\n'
-                '  "combined_rating_potential": 0\n'
-                "}\n\n"
-                "Medical Documents:\n\n"
-                f"{combined_docs}"
-            ),
+    # Also collect veteran's own words (user turns only, trimmed to keep tokens reasonable)
+    user_turns = []
+    for m in interview_messages:
+        if m.role == "user":
+            user_turns.append(decrypt(m.content_encrypted))
+
+    if phase_summaries:
+        # Use structured summaries as primary source — very token-efficient
+        interview_text = "## Structured Interview Summaries (JSON)\n" + "\n\n".join(phase_summaries)
+        # Append veteran statements; keep head+tail to preserve early condition disclosures
+        combined_user = "\n".join(user_turns)
+        if len(combined_user) > 8000:
+            combined_user = (
+                combined_user[:4000]
+                + f"\n\n[... {len(combined_user) - 8000:,} chars omitted ...]\n\n"
+                + combined_user[-4000:]
+            )
+        interview_text += f"\n\n## Veteran's Own Words\n{combined_user}"
+    elif user_turns:
+        # No summaries yet — include all user turns, head+tail if very long
+        combined_user = "\n".join(user_turns)
+        if len(combined_user) > 12000:
+            combined_user = (
+                combined_user[:6000]
+                + f"\n\n[... {len(combined_user) - 12000:,} chars omitted ...]\n\n"
+                + combined_user[-6000:]
+            )
+        interview_text = f"## Interview (veteran's responses)\n{combined_user}"
+    else:
+        interview_text = ""
+
+    if not doc_texts and not interview_text:
+        raise HTTPException(
+            status_code=400,
+            detail="No documents or interview data found. Upload medical records or complete the interview first.",
+        )
+
+    combined_docs = "\n\n".join(doc_texts) if doc_texts else "(No documents uploaded)"
+
+    content = (
+        "Please perform a full VA disability condition assessment based on the information below.\n\n"
+        "## Instructions\n"
+        "- Identify every VA-rateable condition supported by the evidence.\n"
+        "- For `current_rating_pct`: use 0 if the veteran has never been rated for this condition "
+        "(i.e., this is a new claim). Only use a non-zero value if the records indicate an existing VA rating.\n"
+        "- For `combined_rating_current`: calculate using the VA Efficiency Method (NOT simple addition). "
+        "This is 0 if all individual ratings are 0 (no prior VA award).\n"
+        "- For `combined_rating_potential`: estimate what the veteran COULD achieve with optimal evidence, "
+        "using the VA Efficiency Method on the recommended rating percentages.\n"
+        "- Identify secondary condition opportunities (e.g., PTSD → Sleep Apnea).\n"
+        "- List priority actions ranked by impact.\n\n"
+        "## CRITICAL OUTPUT REQUIREMENTS\n"
+        "- Keep EVERY string field to 20 words or fewer — brevity is mandatory.\n"
+        "- Output ONLY the raw JSON object — absolutely NO markdown code fences, NO ```json, NO ``` anywhere.\n"
+        "- Do NOT truncate the JSON. The closing braces at the end are required. Complete the full structure.\n\n"
+        "Output ONLY valid JSON matching this exact schema:\n"
+        "{\n"
+        '  "conditions": [\n'
+        '    {\n'
+        '      "name": "condition name",\n'
+        '      "dc_code": "XXXX",\n'
+        '      "icd10": "X00.0",\n'
+        '      "evidence": "specific evidence from the records",\n'
+        '      "current_rating_pct": 0,\n'
+        '      "recommended_rating_pct": 30,\n'
+        '      "rating_basis": "CFR 38 Part 4 criteria that supports this rating",\n'
+        '      "pathway_to_higher": "what additional evidence would support a higher rating",\n'
+        '      "dbq_form": "DBQ form name",\n'
+        '      "type": "primary|secondary|presumptive",\n'
+        '      "nexus_needed": true\n'
+        "    }\n"
+        "  ],\n"
+        '  "secondary_opportunities": [\n'
+        '    {"condition": "", "caused_by": "", "evidence_status": "", "next_step": ""}\n'
+        "  ],\n"
+        '  "priority_actions": [\n'
+        '    {"action": "", "expected_impact": ""}\n'
+        "  ],\n"
+        '  "combined_rating_current": 0,\n'
+        '  "combined_rating_potential": 0\n'
+        "}\n\n"
+    )
+
+    if interview_text:
+        content += f"## Interview Transcript\n{interview_text}\n\n"
+
+    content += f"## Medical Documents\n{combined_docs}"
+
+    messages = [{"role": "user", "content": content}]
+
+    # Retry up to 2 times on rate limit, waiting 65 s between attempts
+    result_text = None
+    for attempt in range(3):
+        try:
+            result_text = await complete(get_condition_assessor_prompt_lite(), messages, max_tokens=8192)
+            break
+        except anthropic.RateLimitError:
+            if attempt < 2:
+                import logging
+                logging.warning("Rate limit hit on assessment attempt %d — waiting 65 s", attempt + 1)
+                await asyncio.sleep(65)
+        except anthropic.APIError as e:
+            raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+
+    if result_text is None:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit reached after retries. Please wait a minute and try again.",
+        )
+
+    import logging
+    logging.warning("ASSESSMENT RAW (first 800 chars): %s", result_text[:800])
+
+    assessment_json = _extract_json(result_text)
+    if not assessment_json or "conditions" not in assessment_json:
+        logging.warning("ASSESSMENT JSON PARSE FAILED. Full response:\n%s", result_text)
+        assessment_json = {
+            "conditions": [],
+            "secondary_opportunities": [],
+            "priority_actions": [{"action": "Assessment parsing failed — please re-run", "expected_impact": ""}],
+            "combined_rating_current": 0,
+            "combined_rating_potential": 0,
+            "_raw": result_text[:500],
         }
-    ]
-
-    result_text = await complete(get_condition_assessor_prompt(), messages, max_tokens=4096)
-
-    # Extract JSON from response
-    try:
-        start = result_text.find("{")
-        end = result_text.rfind("}") + 1
-        assessment_json = json.loads(result_text[start:end])
-    except (json.JSONDecodeError, ValueError):
-        assessment_json = {"raw": result_text}
 
     case.assessment_result_encrypted = encrypt(json.dumps(assessment_json))
     case.status = "in_progress"

@@ -1,4 +1,5 @@
 import json
+import anthropic
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -76,11 +77,21 @@ async def send_message(
     # SSE streaming response
     async def event_stream():
         full_response = ""
-        async for chunk in stream_chat(system_prompt, claude_messages):
-            full_response += chunk
-            yield f"data: {json.dumps({'text': chunk})}\n\n"
+        try:
+            async for chunk in stream_chat(system_prompt, claude_messages):
+                full_response += chunk
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+        except anthropic.RateLimitError:
+            yield f"data: {json.dumps({'error': 'Rate limit reached — please wait a moment and try again.'})}\n\n"
+            return
+        except anthropic.APIError as e:
+            yield f"data: {json.dumps({'error': f'AI service error: {e}'})}\n\n"
+            return
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return
 
-        # Persist assistant response
+        # Persist assistant response and advance phase when Claude emits a summary
         async with db.begin():
             assistant_msg = Message(
                 case_id=case_id,
@@ -89,8 +100,10 @@ async def send_message(
                 phase=case.current_phase,
             )
             db.add(assistant_msg)
+            if "<phase_summary>" in full_response and case.current_phase < 5:
+                case.current_phase += 1
 
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'current_phase': case.current_phase})}\n\n"
 
     return StreamingResponse(
         event_stream(),

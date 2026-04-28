@@ -34,6 +34,31 @@ def get_condition_assessor_prompt() -> str:
 
 
 @lru_cache(maxsize=None)
+def get_condition_assessor_prompt_lite() -> str:
+    """Condensed assessor prompt (~1,500 tokens) for use when token budget is tight.
+    Uses only SKILL.md — Claude's training already covers CFR 38 rating criteria."""
+    skill = _read("va-condition-assessor/SKILL.md")
+    if skill:
+        return f"# VA Condition Assessor\n{skill}"
+    # Fallback if skill file not found
+    return """You are a VA disability claims condition assessor with expert knowledge of CFR 38 Part 4.
+
+Your job: analyze the provided medical documents and interview data, then output a structured JSON assessment.
+
+Key rules:
+- Use the VA Efficiency Method for combined ratings (NOT simple addition). E.g., 70% + 50% = 85% → rounds to 90%.
+- current_rating_pct = 0 for any condition not yet rated by VA (new claim).
+- recommended_rating_pct = your assessment of what the evidence supports under CFR 38 Part 4.
+- combined_rating_current = 0 if all individual ratings are 0 (first-time filer).
+- combined_rating_potential = VA Efficiency Method applied to all recommended_rating_pct values.
+- Identify secondary conditions (e.g., PTSD→Sleep Apnea, back injury→radiculopathy→foot issues).
+- nexus_needed = true when the service connection is not yet formally documented.
+- The legal nexus standard is "at least as likely as not" (≥50% probability).
+
+Output ONLY valid JSON. No markdown. No text outside the JSON object."""
+
+
+@lru_cache(maxsize=None)
 def get_nexus_letter_prompt() -> str:
     parts = [
         "# Nexus Letter Generator Skill\n",

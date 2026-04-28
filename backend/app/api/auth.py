@@ -1,11 +1,12 @@
 import secrets
 import io
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 import pyotp
 import qrcode
 import qrcode.image.svg
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
 from slowapi import Limiter
@@ -14,12 +15,13 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.models.database import get_db, User
+from app.models.database import get_db, User, Case, Document
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_refresh_token
 from app.core.encryption import encrypt, decrypt
 from app.core.config import settings
 from app.core.audit import log_action
 from app.services.email_service import send_verification_email
+from app.api.deps import get_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -30,6 +32,9 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
     persistence_opt_in: bool = False
+    first_name: str
+    middle_name: Optional[str] = None
+    last_name: str
 
 
 class LoginRequest(BaseModel):
@@ -49,6 +54,7 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     totp_required: bool = False
+    first_name: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -83,6 +89,9 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
         password_hash=hash_password(body.password),
         email_verification_token=verification_token,
         persistence_opt_in=body.persistence_opt_in,
+        first_name_encrypted=encrypt(body.first_name),
+        middle_name_encrypted=encrypt(body.middle_name) if body.middle_name else None,
+        last_name_encrypted=encrypt(body.last_name),
     )
     db.add(user)
     await db.commit()
@@ -111,8 +120,10 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     user = result.scalar_one_or_none()
     ip = _client_ip(request)
 
-    # Always run hash comparison to prevent timing attacks
-    dummy_hash = "$2b$12$invalidhashfortimingprotection000000000000000000000000"
+    # Always run hash comparison to prevent timing attacks. The dummy hash is
+    # a real bcrypt of an unguessable random string — verifying against it
+    # always returns False but takes the same time as a real verification.
+    dummy_hash = "$2b$12$2din5nmOLvoogN.DF41Lsu4b9lTFfh3WXS.Ykifj6K0AlHbhQWc2G"
     password_ok = verify_password(body.password, user.password_hash if user else dummy_hash)
 
     if not user or not password_ok:
@@ -149,7 +160,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     return {"totp_required": True, "partial_token": partial_token}
 
 
-@router.post("/totp/setup")
+@router.get("/totp/setup")
 async def totp_setup(request: Request, db: AsyncSession = Depends(get_db)):
     """Generate a TOTP secret and return QR code for enrollment."""
     from app.api.deps import bearer
@@ -207,10 +218,12 @@ async def totp_verify(body: TOTPVerifyRequest, request: Request, db: AsyncSessio
     user.last_login = datetime.now(timezone.utc)
     await db.commit()
 
+    first_name = decrypt(user.first_name_encrypted) if user.first_name_encrypted else None
     await log_action(db, "login_success", user_id=user.id, ip_address=_client_ip(request))
     return TokenResponse(
         access_token=create_access_token(user.id),
         refresh_token=create_refresh_token(user.id),
+        first_name=first_name,
     )
 
 
@@ -228,7 +241,43 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
     return TokenResponse(
         access_token=create_access_token(user.id),
         refresh_token=create_refresh_token(user.id),
+        first_name=decrypt(user.first_name_encrypted) if user.first_name_encrypted else None,
     )
+
+
+@router.get("/me")
+async def me(current_user: User = Depends(get_current_user)):
+    return {
+        "first_name": decrypt(current_user.first_name_encrypted) if current_user.first_name_encrypted else None,
+        "last_name": decrypt(current_user.last_name_encrypted) if current_user.last_name_encrypted else None,
+        "email": current_user.email,
+    }
+
+
+@router.delete("/account", status_code=204)
+async def delete_account(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently delete the account and all associated data (HIPAA erasure)."""
+    # Collect document file paths before deleting rows
+    cases_result = await db.execute(select(Case).where(Case.user_id == current_user.id))
+    cases = cases_result.scalars().all()
+
+    for case in cases:
+        docs_result = await db.execute(select(Document).where(Document.case_id == case.id))
+        for doc in docs_result.scalars().all():
+            for fp in (doc.file_path, doc.extracted_text_path):
+                if fp:
+                    try:
+                        Path(fp).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+    await log_action(db, "account_deleted", user_id=current_user.id)
+    await db.delete(current_user)
+    await db.commit()
+    return Response(status_code=204)
 
 
 @router.post("/logout")

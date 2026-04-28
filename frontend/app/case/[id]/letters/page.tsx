@@ -1,8 +1,8 @@
 "use client";
+import { Suspense } from "react";
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import ReactMarkdown from "react-markdown";
 import { Loader2, Plus, ChevronDown, ChevronRight, Download, AlertCircle } from "lucide-react";
 import { api } from "@/lib/api";
 
@@ -12,7 +12,7 @@ const LETTER_TYPES = [
   { value: "buddy", label: "Buddy / Lay Witness Letter" },
 ];
 
-export default function LettersPage() {
+function LettersContent() {
   const { id } = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const prefillCondition = searchParams.get("condition") ?? "";
@@ -85,7 +85,6 @@ export default function LettersPage() {
         </button>
       </div>
 
-      {/* Generate form */}
       {showForm && (
         <form
           onSubmit={handleGenerate}
@@ -176,7 +175,6 @@ export default function LettersPage() {
         </form>
       )}
 
-      {/* Letters list */}
       {loading ? (
         <div className="flex justify-center py-12">
           <Loader2 className="w-6 h-6 animate-spin text-gray-300" />
@@ -259,5 +257,13 @@ export default function LettersPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function LettersPage() {
+  return (
+    <Suspense fallback={<div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-gray-300" /></div>}>
+      <LettersContent />
+    </Suspense>
   );
 }

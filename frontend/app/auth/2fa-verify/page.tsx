@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { auth } from "@/lib/api";
+import { api, auth } from "@/lib/api";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -36,6 +36,7 @@ export default function TwoFAVerifyPage() {
       const data = await res.json();
       sessionStorage.removeItem("partial_token");
       auth.setTokens(data.access_token, data.refresh_token);
+      if (data.first_name) auth.setName(data.first_name);
       router.replace("/dashboard");
     } catch (err: any) {
       toast.error(err.message);
