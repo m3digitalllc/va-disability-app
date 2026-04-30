@@ -21,16 +21,15 @@ export default function TwoFASetupPage() {
       return;
     }
 
-    // Fetch QR code image
+    // Fetch QR code + secret as JSON
     fetch(`${API}/api/auth/totp/setup`, {
       headers: { Authorization: `Bearer ${setupToken}` },
     })
       .then(async (res) => {
         if (!res.ok) throw new Error("Failed to get QR code");
-        const secretHeader = res.headers.get("X-TOTP-Secret");
-        setSecret(secretHeader);
-        const blob = await res.blob();
-        setQrUrl(URL.createObjectURL(blob));
+        const data: { secret: string; qr_png_base64: string } = await res.json();
+        setSecret(data.secret);
+        setQrUrl(`data:image/png;base64,${data.qr_png_base64}`);
       })
       .catch((err) => {
         toast.error(err.message);
@@ -47,6 +46,7 @@ export default function TwoFASetupPage() {
     try {
       const res = await fetch(`${API}/api/auth/totp/verify`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${setupToken}`,
@@ -59,7 +59,7 @@ export default function TwoFASetupPage() {
       }
       const data = await res.json();
       sessionStorage.removeItem("setup_token");
-      auth.setTokens(data.access_token, data.refresh_token);
+      auth.setTokens(data.access_token);
       if (data.first_name) auth.setName(data.first_name);
       toast.success(`Welcome to VA Claims Assistant${data.first_name ? `, ${data.first_name}` : ""}! Two-factor authentication is enabled.`);
       router.replace("/dashboard");

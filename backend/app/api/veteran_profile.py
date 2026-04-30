@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from typing import Optional, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.database import get_db, User, VeteranProfile, ServicePay
 from app.api.deps import get_current_user
+from app.core.audit import log_action
 from app.core.encryption import encrypt, decrypt
+from app.core.rate_limit import client_ip
 
 router = APIRouter(prefix="/api/veteran-profile", tags=["veteran-profile"])
 
@@ -72,6 +74,7 @@ def _dec(val: Optional[str]) -> Optional[str]:
 
 @router.get("")
 async def get_profile(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -85,7 +88,7 @@ async def get_profile(
     )
     sp = sp_result.scalar_one_or_none()
 
-    return {
+    profile = {
         "contact": {
             "va_file_number": vp.va_file_number if vp else None,
             "service_number_dod_id": vp.service_number_dod_id if vp else None,
@@ -126,10 +129,16 @@ async def get_profile(
             "waive_va_for_training_pay": sp.waive_va_for_training_pay if sp else None,
         },
     }
+    await log_action(
+        db, "profile_read", user_id=current_user.id, resource_type="profile",
+        resource_id=current_user.id, ip_address=client_ip(request),
+    )
+    return profile
 
 
 @router.put("")
 async def upsert_profile(
+    request: Request,
     body: ProfileUpsertRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -228,4 +237,8 @@ async def upsert_profile(
             sp.waive_va_for_training_pay = s.waive_va_for_training_pay
 
     await db.commit()
+    await log_action(
+        db, "profile_updated", user_id=current_user.id, resource_type="profile",
+        resource_id=current_user.id, ip_address=client_ip(request),
+    )
     return {"message": "Profile saved"}

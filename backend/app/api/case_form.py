@@ -7,12 +7,14 @@ manual overrides the veteran has made.
 """
 
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import get_db, User
 from app.api.deps import get_current_user
+from app.core.audit import log_action
+from app.core.rate_limit import client_ip
 from app.services.claim_form_service import assemble_form_data, save_form_overrides
 from app.services.claim_form_filler import fill_form_21_526ez
 
@@ -27,6 +29,7 @@ class FormOverridesRequest(BaseModel):
 
 @router.get("")
 async def get_form(
+    request: Request,
     case_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -42,11 +45,16 @@ async def get_form(
     result = await assemble_form_data(case_id, user, db)
     if result is None:
         raise HTTPException(status_code=404, detail="Case not found")
+    await log_action(
+        db, "form_read", user_id=user.id, resource_type="case",
+        resource_id=case_id, ip_address=client_ip(request),
+    )
     return result
 
 
 @router.put("")
 async def update_form(
+    request: Request,
     case_id: str,
     body: FormOverridesRequest,
     user: User = Depends(get_current_user),
@@ -58,6 +66,10 @@ async def update_form(
     ok = await save_form_overrides(case_id, user, db, body.overrides)
     if not ok:
         raise HTTPException(status_code=404, detail="Case not found")
+    await log_action(
+        db, "form_updated", user_id=user.id, resource_type="case",
+        resource_id=case_id, ip_address=client_ip(request),
+    )
     # Return the freshly-merged state so the UI stays in sync
     return await assemble_form_data(case_id, user, db)
 
@@ -82,6 +94,7 @@ async def _build_filled_pdf(case_id: str, user: User, db: AsyncSession) -> bytes
 
 @router.get("/pdf")
 async def download_filled_pdf(
+    request: Request,
     case_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -95,6 +108,10 @@ async def download_filled_pdf(
     fields; we never re-render the layout).
     """
     filled_bytes = await _build_filled_pdf(case_id, user, db)
+    await log_action(
+        db, "form_pdf_downloaded", user_id=user.id, resource_type="case",
+        resource_id=case_id, ip_address=client_ip(request),
+    )
     return Response(
         content=filled_bytes,
         media_type="application/pdf",
@@ -109,6 +126,7 @@ async def download_filled_pdf(
 
 @router.get("/pdf/preview")
 async def preview_filled_pdf(
+    request: Request,
     case_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -118,6 +136,10 @@ async def preview_filled_pdf(
     Same-origin framing is allowed so the form page can iframe-embed this.
     """
     filled_bytes = await _build_filled_pdf(case_id, user, db)
+    await log_action(
+        db, "form_pdf_previewed", user_id=user.id, resource_type="case",
+        resource_id=case_id, ip_address=client_ip(request),
+    )
     return Response(
         content=filled_bytes,
         media_type="application/pdf",

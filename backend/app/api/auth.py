@@ -1,18 +1,13 @@
-import secrets
+import base64
 import io
+import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 import pyotp
 import qrcode
-import qrcode.image.svg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-
-limiter = Limiter(key_func=get_remote_address)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.database import get_db, User, Case, Document
@@ -20,6 +15,7 @@ from app.core.security import hash_password, verify_password, create_access_toke
 from app.core.encryption import encrypt, decrypt
 from app.core.config import settings
 from app.core.audit import log_action
+from app.core.rate_limit import limiter, client_ip
 from app.services.email_service import send_verification_email
 from app.api.deps import get_current_user
 
@@ -46,22 +42,49 @@ class TOTPVerifyRequest(BaseModel):
     code: str
 
 
-class RefreshRequest(BaseModel):
-    refresh_token: str
-
-
 class TokenResponse(BaseModel):
+    """Refresh token is no longer returned in the JSON body — it's set as an
+    httpOnly cookie by the issuing endpoints (login flow, totp verify, refresh).
+    Frontend keeps access_token in memory only."""
     access_token: str
-    refresh_token: str
     totp_required: bool = False
     first_name: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    return forwarded.split(",")[0].strip() if forwarded else request.client.host
+REFRESH_COOKIE_NAME = "refresh_token"
+REFRESH_COOKIE_PATH = "/api/auth"
+
+
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    """Issue the refresh token as an httpOnly cookie scoped to /api/auth.
+
+    secure=True only in non-development environments — local docker-compose
+    serves over http://localhost where Secure cookies would be silently dropped
+    by the browser. SameSite=strict prevents the cookie from being sent on
+    cross-site navigations or third-party iframe submissions.
+    """
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=settings.ENVIRONMENT != "development",
+        samesite="strict",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path=REFRESH_COOKIE_PATH,
+    )
+
+
+def _read_refresh_token(request: Request) -> Optional[str]:
+    """Read the refresh token from the httpOnly cookie. The body fallback that
+    existed during the cookie migration window has been removed — clients must
+    rely on the cookie set on /login, /totp/verify, and /refresh."""
+    return request.cookies.get(REFRESH_COOKIE_NAME)
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
 
 
 def _check_password_strength(password: str) -> None:
@@ -76,7 +99,8 @@ def _check_password_strength(password: str) -> None:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/register", status_code=201)
-async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def register(request: Request, body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     _check_password_strength(body.password)
 
     existing = await db.execute(select(User).where(User.email == body.email))
@@ -97,12 +121,13 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     await db.commit()
 
     send_verification_email(body.email, verification_token)
-    await log_action(db, "register", user_id=user.id, ip_address=_client_ip(request))
+    await log_action(db, "register", user_id=user.id, ip_address=client_ip(request))
     return {"message": "Registration successful. Check your email to verify your account."}
 
 
 @router.get("/verify-email")
-async def verify_email(token: str, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def verify_email(request: Request, token: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email_verification_token == token))
     user = result.scalar_one_or_none()
     if not user:
@@ -115,10 +140,11 @@ async def verify_email(token: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login")
-async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
-    ip = _client_ip(request)
+    ip = client_ip(request)
 
     # Always run hash comparison to prevent timing attacks. The dummy hash is
     # a real bcrypt of an unguessable random string — verifying against it
@@ -161,6 +187,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
 
 
 @router.get("/totp/setup")
+@limiter.limit("10/minute")
 async def totp_setup(request: Request, db: AsyncSession = Depends(get_db)):
     """Generate a TOTP secret and return QR code for enrollment."""
     from app.api.deps import bearer
@@ -186,15 +213,17 @@ async def totp_setup(request: Request, db: AsyncSession = Depends(get_db)):
     img = qrcode.make(provisioning_uri)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    buf.seek(0)
+    qr_png_base64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-    return StreamingResponse(buf, media_type="image/png", headers={
-        "X-TOTP-Secret": secret,  # also return secret for manual entry
-    })
+    # Secret is returned in the JSON body so the frontend can render a
+    # manual-entry fallback, but it's no longer in a CORS-exposed header
+    # where browser extensions and TLS-inspection proxies can scoop it up.
+    return {"secret": secret, "qr_png_base64": qr_png_base64}
 
 
 @router.post("/totp/verify")
-async def totp_verify(body: TOTPVerifyRequest, request: Request, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def totp_verify(request: Request, body: TOTPVerifyRequest, response: Response, db: AsyncSession = Depends(get_db)):
     """Verify TOTP code. On success, enable TOTP and issue full JWT pair."""
     from app.api.deps import bearer
     auth = await bearer(request)
@@ -208,28 +237,48 @@ async def totp_verify(body: TOTPVerifyRequest, request: Request, db: AsyncSessio
     if not user or not user.totp_secret_encrypted:
         raise HTTPException(status_code=400, detail="TOTP not configured")
 
+    # TOTP lockout check — mirrors password lockout in /login
+    if user.totp_locked_until and user.totp_locked_until > datetime.now(timezone.utc):
+        raise HTTPException(status_code=403, detail="TOTP temporarily locked. Try again later.")
+
     secret = decrypt(user.totp_secret_encrypted)
     totp = pyotp.TOTP(secret)
     if not totp.verify(body.code, valid_window=1):
-        await log_action(db, "totp_verify_failed", user_id=user.id, ip_address=_client_ip(request), success=False)
+        now = datetime.now(timezone.utc)
+        user.totp_failed_attempts += 1
+        if user.totp_failed_attempts >= settings.MAX_LOGIN_ATTEMPTS:
+            user.totp_locked_until = now + timedelta(minutes=settings.LOCKOUT_MINUTES)
+        await db.commit()
+        await log_action(db, "totp_verify_failed", user_id=user.id, ip_address=client_ip(request), success=False)
         raise HTTPException(status_code=400, detail="Invalid TOTP code")
 
+    # Success — reset TOTP failure counters
+    user.totp_failed_attempts = 0
+    user.totp_locked_until = None
     user.totp_enabled = True
     user.last_login = datetime.now(timezone.utc)
     await db.commit()
 
     first_name = decrypt(user.first_name_encrypted) if user.first_name_encrypted else None
-    await log_action(db, "login_success", user_id=user.id, ip_address=_client_ip(request))
+    await log_action(db, "login_success", user_id=user.id, ip_address=client_ip(request))
+    _set_refresh_cookie(response, create_refresh_token(user.id))
     return TokenResponse(
         access_token=create_access_token(user.id),
-        refresh_token=create_refresh_token(user.id),
         first_name=first_name,
     )
 
 
 @router.post("/refresh")
-async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
-    user_id = decode_refresh_token(body.refresh_token)
+@limiter.limit("10/minute")
+async def refresh_token(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    token = _read_refresh_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="No refresh token provided")
+    user_id = decode_refresh_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
@@ -238,9 +287,9 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
+    _set_refresh_cookie(response, create_refresh_token(user.id))
     return TokenResponse(
         access_token=create_access_token(user.id),
-        refresh_token=create_refresh_token(user.id),
         first_name=decrypt(user.first_name_encrypted) if user.first_name_encrypted else None,
     )
 
@@ -281,6 +330,8 @@ async def delete_account(
 
 
 @router.post("/logout")
-async def logout():
-    # Client discards tokens; stateless JWT — nothing to invalidate server-side in MVP
+async def logout(response: Response):
+    # Stateless JWT — server has nothing to revoke for the access token, but we
+    # do clear the refresh cookie so the browser stops sending it.
+    _clear_refresh_cookie(response)
     return {"message": "Logged out"}

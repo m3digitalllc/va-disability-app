@@ -1,10 +1,13 @@
 import re
 import json
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from typing import Any, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
-from app.models.database import User
+from app.core.audit import log_action
+from app.core.rate_limit import limiter, client_ip
+from app.models.database import User, get_db
 from app.services.claude_service import complete
 
 router = APIRouter(prefix="/api/profile-chat", tags=["profile-chat"])
@@ -158,9 +161,12 @@ async def section_greeting(section: str, _: User = Depends(get_current_user)):
 
 
 @router.post("/send")
+@limiter.limit("30/minute")
 async def profile_chat_send(
+    request: Request,
     body: ProfileChatRequest,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     system = SECTION_PROMPTS.get(body.section)
     if not system:
@@ -173,5 +179,10 @@ async def profile_chat_send(
 
     raw = await complete(system, messages, max_tokens=1024)
     reply, field_updates = _parse_response(raw)
+
+    await log_action(
+        db, "profile_chat_sent", user_id=current_user.id, resource_type="profile",
+        resource_id=current_user.id, ip_address=client_ip(request),
+    )
 
     return {"reply": reply, "field_updates": field_updates}

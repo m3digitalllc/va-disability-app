@@ -34,6 +34,8 @@ class User(Base):
     persistence_opt_in = Column(Boolean, default=False, nullable=False)
     failed_login_attempts = Column(Integer, default=0, nullable=False)
     locked_until = Column(DateTime(timezone=True), nullable=True)
+    totp_failed_attempts = Column(Integer, default=0, nullable=False)
+    totp_locked_until = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
 
@@ -243,6 +245,8 @@ async def create_tables():
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS review_summary_encrypted TEXT",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS review_status VARCHAR DEFAULT 'unreviewed'",
             "ALTER TABLE cases ADD COLUMN IF NOT EXISTS form_overrides JSONB",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_failed_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_locked_until TIMESTAMP WITH TIME ZONE",
         ]
         for sql in migrations:
             await conn.execute(__import__("sqlalchemy").text(sql))

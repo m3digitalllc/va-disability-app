@@ -1,15 +1,20 @@
 import json
+import logging
 import anthropic
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.models.database import get_db, Case, Message, User
+from app.models.database import get_db, async_session_factory, Case, Message, User
 from app.api.deps import get_current_user
+from app.core.audit import log_action
 from app.core.encryption import encrypt, decrypt
+from app.core.rate_limit import limiter, client_ip
 from app.services.skills_loader import get_interview_conductor_prompt
 from app.services.claude_service import stream_chat
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cases/{case_id}/chat", tags=["chat"])
 
@@ -28,6 +33,7 @@ async def _get_case(case_id: str, user: User, db: AsyncSession) -> Case:
 
 @router.get("/history")
 async def get_history(
+    request: Request,
     case_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -37,6 +43,10 @@ async def get_history(
         select(Message).where(Message.case_id == case_id).order_by(Message.created_at)
     )
     messages = result.scalars().all()
+    await log_action(
+        db, "chat_history_read", user_id=user.id, resource_type="case",
+        resource_id=case_id, ip_address=client_ip(request),
+    )
     return [
         {"role": m.role, "content": decrypt(m.content_encrypted), "phase": m.phase}
         for m in messages
@@ -44,7 +54,9 @@ async def get_history(
 
 
 @router.post("/send")
+@limiter.limit("30/minute")
 async def send_message(
+    request: Request,
     case_id: str,
     body: ChatMessage,
     user: User = Depends(get_current_user),
@@ -74,6 +86,11 @@ async def send_message(
 
     system_prompt = get_interview_conductor_prompt()
 
+    # Capture IP before the closure so the audit log can record it after
+    # the streamed response finishes (the Request object isn't safe to use
+    # from inside the generator).
+    request_ip = client_ip(request)
+
     # SSE streaming response
     async def event_stream():
         full_response = ""
@@ -85,13 +102,18 @@ async def send_message(
             yield f"data: {json.dumps({'error': 'Rate limit reached — please wait a moment and try again.'})}\n\n"
             return
         except anthropic.APIError as e:
-            yield f"data: {json.dumps({'error': f'AI service error: {e}'})}\n\n"
+            logger.exception("Anthropic API error in chat stream")
+            yield f"data: {json.dumps({'error': 'The AI service is temporarily unavailable. Please try again.'})}\n\n"
             return
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        except Exception:
+            logger.exception("Unexpected error in chat stream")
+            yield f"data: {json.dumps({'error': 'An unexpected error occurred. Please try again.'})}\n\n"
             return
 
-        # Persist assistant response and advance phase when Claude emits a summary
+        # Persist assistant response and advance phase when Claude emits a summary.
+        # Audit log uses its own session — the request-scoped db may be in an
+        # ambiguous state inside the generator (FastAPI may have already
+        # released it by the time the stream completes).
         async with db.begin():
             assistant_msg = Message(
                 case_id=case_id,
@@ -102,6 +124,12 @@ async def send_message(
             db.add(assistant_msg)
             if "<phase_summary>" in full_response and case.current_phase < 5:
                 case.current_phase += 1
+
+        async with async_session_factory() as audit_db:
+            await log_action(
+                audit_db, "chat_message_sent", user_id=user.id,
+                resource_type="case", resource_id=case_id, ip_address=request_ip,
+            )
 
         yield f"data: {json.dumps({'done': True, 'current_phase': case.current_phase})}\n\n"
 

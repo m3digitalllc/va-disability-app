@@ -1,10 +1,12 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy import select
 from app.models.database import get_db, engine, Case, Document, User
 from app.api.deps import get_current_user
+from app.core.audit import log_action
 from app.core.encryption import encrypt
+from app.core.rate_limit import limiter, client_ip
 from app.services.document_service import (
     store_document, sha256_checksum, extract_text_from_pdf,
     store_extracted_text, retrieve_extracted_text,
@@ -21,6 +23,22 @@ ALLOWED_TYPES = {
     "image/tiff",
 }
 MAX_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+
+# Magic-byte prefixes for each declared content type. Validated against the
+# uploaded bytes to reject content-type spoofing (e.g., a .txt renamed .pdf).
+# These are stable across format versions — the leading bytes haven't changed
+# in any version of these formats.
+_MAGIC_PREFIXES: dict[str, tuple[bytes, ...]] = {
+    "application/pdf": (b"%PDF-",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/tiff": (b"II*\x00", b"MM\x00*"),  # little-endian / big-endian
+}
+
+
+def _content_type_matches_magic(content_type: str, data: bytes) -> bool:
+    prefixes = _MAGIC_PREFIXES.get(content_type, ())
+    return any(data.startswith(p) for p in prefixes)
 
 
 class DocumentResponse(BaseModel):
@@ -39,7 +57,7 @@ async def _get_case(case_id: str, user: User, db: AsyncSession) -> Case:
     return case
 
 
-async def _run_review_background(doc_id: str, doc_text: str, doc_name: str):
+async def _run_review_background(doc_id: str, doc_text: str, doc_name: str, user_id: str):
     """Run document review agent in the background and persist the result."""
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with session_factory() as db:
@@ -60,6 +78,10 @@ async def _run_review_background(doc_id: str, doc_text: str, doc_name: str):
             if doc:
                 doc.review_status = "failed"
                 await db.commit()
+            await log_action(
+                db, "document_review_failed", user_id=user_id,
+                resource_type="document", resource_id=doc_id, success=False,
+            )
         return
 
     async with session_factory() as db:
@@ -69,10 +91,15 @@ async def _run_review_background(doc_id: str, doc_text: str, doc_name: str):
             doc.review_summary_encrypted = encrypt(summary_json)
             doc.review_status = "reviewed"
             await db.commit()
+        await log_action(
+            db, "document_reviewed", user_id=user_id,
+            resource_type="document", resource_id=doc_id,
+        )
 
 
 @router.get("", response_model=list[DocumentResponse])
 async def list_documents(
+    request: Request,
     case_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -80,6 +107,10 @@ async def list_documents(
     await _get_case(case_id, user, db)
     result = await db.execute(select(Document).where(Document.case_id == case_id))
     docs = result.scalars().all()
+    await log_action(
+        db, "documents_listed", user_id=user.id, resource_type="case",
+        resource_id=case_id, ip_address=client_ip(request),
+    )
     return [
         DocumentResponse(
             id=d.id,
@@ -93,7 +124,9 @@ async def list_documents(
 
 
 @router.post("", status_code=201, response_model=DocumentResponse)
+@limiter.limit("30/minute")
 async def upload_document(
+    request: Request,
     case_id: str,
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
@@ -107,6 +140,15 @@ async def upload_document(
     data = await file.read()
     if len(data) > MAX_SIZE_BYTES:
         raise HTTPException(status_code=400, detail="File exceeds 50 MB limit")
+
+    # Magic-byte validation: rejects content-type spoofing (e.g., text renamed
+    # `.pdf`). The bytes we'll later parse via PyMuPDF/Pillow must match the
+    # declared MIME type so a malformed file can't slip into the parser stack.
+    if not _content_type_matches_magic(file.content_type, data):
+        raise HTTPException(
+            status_code=400,
+            detail="File contents do not match declared type. Re-export and retry.",
+        )
 
     file_id = str(uuid.uuid4())
     checksum = sha256_checksum(data)
@@ -133,6 +175,11 @@ async def upload_document(
     db.add(doc)
     await db.commit()
 
+    await log_action(
+        db, "document_uploaded", user_id=user.id, resource_type="document",
+        resource_id=doc.id, ip_address=client_ip(request),
+    )
+
     return DocumentResponse(
         id=doc.id,
         original_filename=doc.original_filename,
@@ -143,7 +190,9 @@ async def upload_document(
 
 
 @router.post("/{doc_id}/review", status_code=202)
+@limiter.limit("20/minute")
 async def start_document_review(
+    request: Request,
     case_id: str,
     doc_id: str,
     background_tasks: BackgroundTasks,
@@ -162,12 +211,17 @@ async def start_document_review(
         return {"status": "reviewing", "message": "Review already in progress."}
 
     doc_text = retrieve_extracted_text(doc.extracted_text_path)
-    background_tasks.add_task(_run_review_background, doc_id, doc_text, doc.original_filename)
+    background_tasks.add_task(_run_review_background, doc_id, doc_text, doc.original_filename, user.id)
+    await log_action(
+        db, "document_review_triggered", user_id=user.id, resource_type="document",
+        resource_id=doc_id, ip_address=client_ip(request),
+    )
     return {"status": "started", "message": f"Review started for {doc.original_filename}. This may take several minutes."}
 
 
 @router.delete("/{doc_id}", status_code=204)
 async def delete_document(
+    request: Request,
     case_id: str,
     doc_id: str,
     user: User = Depends(get_current_user),
@@ -179,4 +233,8 @@ async def delete_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     await db.delete(doc)
+    await log_action(
+        db, "document_deleted", user_id=user.id, resource_type="document",
+        resource_id=doc_id, ip_address=client_ip(request),
+    )
     await db.commit()

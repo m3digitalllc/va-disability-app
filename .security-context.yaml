@@ -1,0 +1,204 @@
+schema_version: "1.1"
+
+metadata:
+  generated_at: "2026-04-29T00:00:00Z"
+  generated_by: "security-context-setup@1.1.0"
+  last_reviewed: "2026-04-29"
+  review_cadence_days: 90
+
+project:
+  name: "va-claims-assistant"
+  description: "Conducts an interview and reviews uploaded medical documentation to estimate the VA disability rating a service member may be eligible for, and produces nexus letters establishing service connection for specified disabilities."
+  primary_language: "python"
+  primary_framework: "fastapi"
+  repository_url: "https://github.com/m3digitalllc/va-disability-app.git"
+
+lifecycle:
+  stage:
+    value: "prototype"
+  publicly_reachable:
+    value: "no"
+  exposure_model:
+    value: "local_only"
+  deployment_targets:
+    - platform: "other"
+      environment: "development"
+      url: null
+
+data_handling:
+  categories:
+    auth_credentials:
+      stored: true
+      processed_via_third_party: false
+      third_party_provider: null
+    payment_data:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+    government_identifiers:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+    health_information:
+      stored: true
+      processed_via_third_party: true
+      third_party_provider: "anthropic"
+    precise_location:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+    biometric_data:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+    childrens_data:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+    communications_content:
+      stored: true
+      processed_via_third_party: true
+      third_party_provider: "anthropic"
+    financial_records:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+    employment_hr_data:
+      stored: true
+      processed_via_third_party: false
+      third_party_provider: null
+    legal_privileged:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+    proprietary_business_data:
+      stored: false
+      processed_via_third_party: false
+      third_party_provider: null
+  approximate_user_count:
+    value: "under_100"
+    pending_review: false
+  data_residency_requirements:
+    - jurisdiction: "us"
+      requirement: "must_remain_in_jurisdiction"
+      notes: null
+
+compliance:
+  regimes:
+    - regime: "hipaa"
+      status: "in_progress"
+      role: "n_a"
+      target_audit_date: null
+      notes: "Role declared n_a per operator: app is consumer-facing and operator is not a covered entity or business associate. PHI is handled voluntarily with HIPAA-grade safeguards as a posture choice. status=in_progress + role=n_a flagged as inconsistent in _setup_warnings_overridden."
+    - regime: "ccpa_cpra"
+      status: "in_progress"
+      role: "secondary"
+      target_audit_date: null
+      notes: null
+    - regime: "soc2"
+      status: "in_progress"
+      role: "secondary"
+      target_audit_date: null
+      notes: null
+
+authentication:
+  user_population:
+    value: "internal_only"
+  methods:
+    - "email_password"
+    - "mfa_totp"
+  mfa_required:
+    value: "optional"
+  has_admin_role:
+    value: "no"
+  session_management:
+    storage: "httponly_cookies"
+    timeout_minutes: 15
+
+integrations:
+  paid_external_apis:
+    has_any: "yes"
+    services:
+      - "anthropic"
+  webhooks_received:
+    has_any: "no"
+    sources: []
+  user_supplied_urls_fetched:
+    has_any: "no"
+    contexts: []
+  file_uploads_accepted:
+    has_any: "yes"
+    public_or_private: "private"
+  llm_or_ai_with_user_input:
+    has_any: "yes"
+    has_tool_use: "no"
+    tool_capabilities: []
+    output_rendering: "markdown_sanitized"
+
+infrastructure:
+  waf_or_cdn_filtering:
+    value: "no"
+    provider: null
+  network_access_restrictions:
+    value: "private_network_only"
+  centralized_logging:
+    value: "unknown"
+    pending_review: true
+  audit_logging:
+    value: "sensitive_data_access"
+  secret_storage:
+    value: "dotenv_on_servers"
+  iac_present:
+    value: "yes"
+    tools:
+      - "docker_compose"
+
+threat_actors:
+  in_scope:
+    - "authenticated_users_other_data"
+    - "authenticated_users_priv_escalation"
+    - "financially_motivated_attackers"
+    - "targeted_attackers_specific_interest"
+  prior_incidents:
+    has_any: "no"
+    notes: null
+
+operations:
+  team_size:
+    value: "solo"
+  ai_assisted_development:
+    value: "primary"
+  deployment_cadence:
+    value: "rarely"
+
+disclosure:
+  security_contact_email: null
+  security_txt_path: "/.well-known/security.txt"
+  responsible_disclosure_policy_url: null
+
+audit:
+  scope:
+    include_paths:
+      - "./"
+    exclude_paths:
+      - "node_modules/"
+      - ".next/"
+      - "dist/"
+      - "build/"
+      - "coverage/"
+      - "vendor/"
+      - "__tests__/fixtures/"
+  auto_run_sast: false
+  auto_run_dynamic: false
+  history_dir: ".security-audits/"
+  acknowledged_findings: []
+
+pending_fields:
+  - "infrastructure.centralized_logging"
+  - "disclosure.security_contact_email"
+
+_setup_warnings_overridden:
+  - field: "compliance.regimes[hipaa]"
+    warning: "status=in_progress combined with role=n_a is inconsistent. in_progress implies pursuing compliance under the regime, but n_a means the regime does not apply. Operator confirmed posture: handles PHI but not as a covered entity or business associate; voluntary HIPAA-grade safeguards under the in_progress label."
+    acknowledged_by: "operator"
+    acknowledged_at: "2026-04-29"

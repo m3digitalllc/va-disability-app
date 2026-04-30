@@ -8,3 +8,9 @@ node_modules/
 backend/data/
 *.enc
 nginx/certs/
+.security-audits/
+# Compose-mounted secrets — never commit values. The directory itself plus
+# README.md and .gitkeep are tracked; everything else under secrets/ is ignored.
+secrets/*
+!secrets/.gitkeep
+!secrets/README.md

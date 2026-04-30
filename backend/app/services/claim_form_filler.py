@@ -616,9 +616,33 @@ def fill_form_21_526ez(pdf_bytes: bytes, form_data: dict) -> bytes:
     # Set NeedAppearances on the AcroForm so viewers regenerate field
     # appearances (Adobe Reader otherwise shows pre-built appearances and
     # ignores the values we wrote).
-    from pypdf.generic import BooleanObject, NameObject
+    from pypdf.generic import BooleanObject, NameObject, NumberObject
     if "/AcroForm" in writer._root_object:
         writer._root_object["/AcroForm"][NameObject("/NeedAppearances")] = BooleanObject(True)
+
+    # Lock all filled fields against downstream editing by setting the
+    # ReadOnly flag (/Ff bit 1) on every annotation widget. The veteran
+    # may still print and ink-sign the PDF, but recipients (VSO, attorney,
+    # buddies) opening it in Adobe can't accidentally — or maliciously —
+    # alter the values. Signature fields are intentionally exempted so the
+    # form remains digitally signable.
+    READONLY_FLAG = 1 << 0
+    for page in writer.pages:
+        annots = page.get("/Annots")
+        if not annots:
+            continue
+        for annot_ref in annots:
+            try:
+                annot = annot_ref.get_object()
+                if annot.get("/Subtype") != "/Widget":
+                    continue
+                if annot.get("/FT") == "/Sig":
+                    # Leave signature widgets alone so the form remains signable
+                    continue
+                existing = int(annot.get("/Ff", 0))
+                annot[NameObject("/Ff")] = NumberObject(existing | READONLY_FLAG)
+            except Exception:
+                continue
 
     out = io.BytesIO()
     writer.write(out)

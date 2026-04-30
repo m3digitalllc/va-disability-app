@@ -7,11 +7,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY . .
 
-RUN mkdir -p /app/data/documents
+# Create the data directory before switching users so the non-root account
+# owns it (and can therefore write uploads here at runtime).
+RUN mkdir -p /app/data/documents \
+    && useradd -r -u 1000 -g root -d /app -s /sbin/nologin vaapp \
+    && chown -R vaapp:root /app
+
+USER vaapp
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

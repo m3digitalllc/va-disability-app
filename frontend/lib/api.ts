@@ -1,19 +1,26 @@
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-// Token storage (sessionStorage clears on tab close; upgrade to httpOnly cookies for production)
-const getToken = () =>
-  typeof window !== "undefined" ? sessionStorage.getItem("access_token") : null;
-const getRefreshToken = () =>
-  typeof window !== "undefined" ? sessionStorage.getItem("refresh_token") : null;
+// Access token lives in a module-level variable (memory only) — never written
+// to localStorage or sessionStorage where any XSS-injected script could read
+// it. The refresh token lives in an httpOnly cookie set by the backend on
+// /api/auth/totp/verify, /api/auth/refresh, and cleared on /api/auth/logout.
+// The cookie is scoped to Path=/api/auth so it never leaks to other endpoints.
+let accessToken: string | null = null;
+
+// Pre-TOTP flow tokens (setup_token, partial_token) are short-lived access
+// JWTs used during the 2FA setup/verify dance. They stay in sessionStorage
+// because they're only valid for the next two HTTP calls and the cookie path
+// scoping above wouldn't help them (they need to be sent to non-/api/auth
+// paths during the flow). They are NOT the long-lived refresh token.
+
+const getToken = () => accessToken;
 
 export const auth = {
-  setTokens(access: string, refresh: string) {
-    sessionStorage.setItem("access_token", access);
-    sessionStorage.setItem("refresh_token", refresh);
+  setTokens(access: string) {
+    accessToken = access;
   },
   clearTokens() {
-    sessionStorage.removeItem("access_token");
-    sessionStorage.removeItem("refresh_token");
+    accessToken = null;
   },
   setName(firstName: string) {
     if (typeof window !== "undefined") localStorage.setItem("user_first_name", firstName);
@@ -22,9 +29,8 @@ export const auth = {
     return typeof window !== "undefined" ? localStorage.getItem("user_first_name") : null;
   },
   clearAll() {
-    sessionStorage.removeItem("access_token");
-    sessionStorage.removeItem("refresh_token");
-    localStorage.removeItem("user_first_name");
+    accessToken = null;
+    if (typeof window !== "undefined") localStorage.removeItem("user_first_name");
   },
   isAuthenticated() {
     return !!getToken();
@@ -39,6 +45,7 @@ async function request<T>(
   const token = getToken();
   const res = await fetch(`${API}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -47,23 +54,21 @@ async function request<T>(
   });
 
   if (res.status === 401 && retry) {
-    // Try to refresh
-    const refresh = getRefreshToken();
-    if (refresh) {
-      const refreshRes = await fetch(`${API}/api/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: refresh }),
-      });
-      if (refreshRes.ok) {
-        const data = await refreshRes.json();
-        auth.setTokens(data.access_token, data.refresh_token);
-        if (data.first_name) auth.setName(data.first_name);
-        return request<T>(path, options, false);
-      }
+    // Try to refresh — backend reads the refresh token from the httpOnly
+    // cookie sent automatically by the browser via credentials: "include".
+    const refreshRes = await fetch(`${API}/api/auth/refresh`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (refreshRes.ok) {
+      const data = await refreshRes.json();
+      auth.setTokens(data.access_token);
+      if (data.first_name) auth.setName(data.first_name);
+      return request<T>(path, options, false);
     }
     auth.clearAll();
-    window.location.href = "/auth/login";
+    if (typeof window !== "undefined") window.location.href = "/auth/login";
     throw new Error("Session expired");
   }
 
@@ -103,16 +108,23 @@ export const api = {
   totpSetupUrl: () => `${API}/api/auth/totp/setup`,
 
   totpVerify: (code: string) =>
-    request<{ access_token: string; refresh_token: string; first_name?: string }>(
+    request<{ access_token: string; first_name?: string }>(
       "/api/auth/totp/verify",
       { method: "POST", body: JSON.stringify({ code }) }
     ),
 
   me: () => request<{ first_name: string | null; last_name: string | null; email: string }>("/api/auth/me"),
 
-  logout: () => {
+  logout: async () => {
+    try {
+      // Best-effort: call /logout while still authenticated so the server can
+      // clear the refresh cookie via Set-Cookie. Then locally drop the access
+      // token. If the call 401s (already expired), clear local state anyway.
+      await request<any>("/api/auth/logout", { method: "POST" });
+    } catch {
+      /* no-op — clear local state regardless */
+    }
     auth.clearAll();
-    return request<any>("/api/auth/logout", { method: "POST" });
   },
 
   // Cases
@@ -135,6 +147,7 @@ export const api = {
     form.append("file", file);
     const res = await fetch(`${API}/api/cases/${caseId}/documents`, {
       method: "POST",
+      credentials: "include",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: form,
     });
@@ -161,6 +174,7 @@ export const api = {
     const token = getToken();
     const res = await fetch(`${API}/api/cases/${caseId}/chat/send`, {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -238,9 +252,9 @@ export const api = {
 
   /** Fetch the filled 21-526EZ PDF as a Blob (auth'd; works for preview or download). */
   fetchFilledFormBlob: async (caseId: string): Promise<Blob> => {
-    const token =
-      typeof window !== "undefined" ? sessionStorage.getItem("access_token") : null;
+    const token = getToken();
     const res = await fetch(`${API}/api/cases/${caseId}/form/21-526ez/pdf/preview`, {
+      credentials: "include",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {

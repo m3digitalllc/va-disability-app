@@ -23,6 +23,7 @@ export default function TwoFAVerifyPage() {
     try {
       const res = await fetch(`${API}/api/auth/totp/verify`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${partialToken}`,
@@ -35,7 +36,7 @@ export default function TwoFAVerifyPage() {
       }
       const data = await res.json();
       sessionStorage.removeItem("partial_token");
-      auth.setTokens(data.access_token, data.refresh_token);
+      auth.setTokens(data.access_token);
       if (data.first_name) auth.setName(data.first_name);
       router.replace("/dashboard");
     } catch (err: any) {
