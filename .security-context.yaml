@@ -1,9 +1,9 @@
 schema_version: "1.1"
 
 metadata:
-  generated_at: "2026-04-29T00:00:00Z"
+  generated_at: "2026-09-01T00:00:00Z"
   generated_by: "security-context-setup@1.1.0"
-  last_reviewed: "2026-04-29"
+  last_reviewed: "2026-09-01"
   review_cadence_days: 90
 
 project:
