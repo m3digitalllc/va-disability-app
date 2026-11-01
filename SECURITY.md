@@ -4,8 +4,8 @@
 <!-- Edit the YAML and re-run the security-context-setup skill.   -->
 <!-- ============================================================ -->
 <!-- schema_version: 1.1                                          -->
-<!-- generated_at: 2026-04-29T00:00:00Z                           -->
-<!-- generated_from_hash: 0ebb41ebeeb4                            -->
+<!-- generated_at: 2026-11-01T15:07:59Z                           -->
+<!-- generated_from_hash: e0ae634824a1                            -->
 <!-- ============================================================ -->
 
 # Security Context: va-claims-assistant
@@ -29,7 +29,7 @@ date, regenerate it by running the `security-context-setup` skill.
 | **Primary stack** | python / fastapi |
 | **User population** | internal_only |
 | **Compliance regimes** | HIPAA (in_progress, role n_a), CCPA/CPRA (in_progress, secondary), SOC2 (in_progress, secondary) |
-| **Last reviewed** | 2026-04-29 |
+| **Last reviewed** | 2026-11-01 |
 | **Review cadence** | every 90 days |
 
 ---
